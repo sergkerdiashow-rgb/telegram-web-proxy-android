@@ -28,6 +28,16 @@ jobs:
           set -euxo pipefail
           cat chunks/*.txt | base64 --decode | gzip --decompress > ci_bundle.py
           python3 ci_bundle.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('apply_web_proxy_patch.py')
+          s = p.read_text()
+          needle = '        2,\n        "ProxyList ignore WEB in all-checked state",'
+          if s.count(needle) != 1:
+              raise SystemExit(f'hotfix target count={s.count(needle)}')
+          p.write_text(s.replace(needle, '        1,\n        "ProxyList ignore WEB in all-checked state",'))
+          print('applied CI patcher count hotfix')
+          PY
           python3 -m py_compile apply_web_proxy_patch.py protocol_vectors_test.py
           python3 protocol_vectors_test.py
 
