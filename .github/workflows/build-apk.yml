@@ -15,7 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx6g
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx3g
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
 
     steps:
       - name: Checkout POC kit
@@ -80,18 +81,36 @@ jobs:
         shell: bash
         run: python3 apply_web_proxy_patch.py Telegram
 
+      - name: Restrict build to ARM64
+        working-directory: Telegram
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("TMessagesProj_App/build.gradle")
+          text = path.read_text()
+          old = 'abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"'
+          count = text.count(old)
+          if count != 3:
+              raise SystemExit(f"Expected 3 ABI filter declarations, found {count}")
+          path.write_text(text.replace(old, 'abiFilters "arm64-v8a"'))
+          PY
+          grep -n "abiFilters" TMessagesProj_App/build.gradle
+
       - name: Show patch summary
         shell: bash
         run: |
           git -C Telegram status --short
           git -C Telegram diff --stat
 
-      - name: Build debug APK
+      - name: Build ARM64 debug APK
         working-directory: Telegram
         shell: bash
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace :TMessagesProj_App:assembleAfatDebug
+          ./gradlew --no-daemon --stacktrace --max-workers=2 :TMessagesProj_App:assembleAfatDebug
 
       - name: Verify APK exists
         shell: bash
@@ -103,7 +122,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: telegram-web-proxy-android-poc
+          name: telegram-web-proxy-android-poc-arm64
           path: |
             Telegram/TMessagesProj_App/build/outputs/apk/afat/debug/app.apk
             app.apk.sha256
