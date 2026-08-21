@@ -1,0 +1,115 @@
+name: Build Telegram WEB Proxy Android POC
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx6g
+
+    steps:
+      - name: Checkout POC kit
+        uses: actions/checkout@v4
+
+      - name: Reconstruct reviewed POC sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat chunks/*.txt | base64 --decode | gzip --decompress > ci_bundle.py
+          python3 ci_bundle.py
+          python3 -m py_compile apply_web_proxy_patch.py protocol_vectors_test.py
+          python3 protocol_vectors_test.py
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android command-line tools
+        uses: android-actions/setup-android@v3
+
+      - name: Install exact Android SDK, NDK and CMake
+        shell: bash
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;27.2.12479018" \
+            "cmake;3.10.2.4988404"
+
+      - name: Checkout pinned Telegram Android source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir Telegram
+          git -C Telegram init
+          git -C Telegram remote add origin https://github.com/DrKLO/Telegram.git
+          git -C Telegram fetch --depth=1 origin 45ab8f4308496e1f01026a97fcdb0d58a5274474
+          git -C Telegram checkout --detach FETCH_HEAD
+          git -C Telegram submodule update --init --recursive --depth=1
+          test "$(git -C Telegram rev-parse HEAD)" = "45ab8f4308496e1f01026a97fcdb0d58a5274474"
+
+      - name: Verify patch compatibility
+        shell: bash
+        run: python3 apply_web_proxy_patch.py Telegram --dry-run
+
+      - name: Apply WEB proxy Android POC
+        shell: bash
+        run: python3 apply_web_proxy_patch.py Telegram
+
+      - name: Show patch summary
+        shell: bash
+        run: |
+          git -C Telegram status --short
+          git -C Telegram diff --stat
+
+      - name: Build debug APK
+        working-directory: Telegram
+        shell: bash
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace :TMessagesProj_App:assembleAfatDebug
+
+      - name: Verify APK exists
+        shell: bash
+        run: |
+          test -s Telegram/TMessagesProj_App/build/outputs/apk/afat/debug/app.apk
+          ls -lh Telegram/TMessagesProj_App/build/outputs/apk/afat/debug/app.apk
+          sha256sum Telegram/TMessagesProj_App/build/outputs/apk/afat/debug/app.apk | tee app.apk.sha256
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-web-proxy-android-poc
+          path: |
+            Telegram/TMessagesProj_App/build/outputs/apk/afat/debug/app.apk
+            app.apk.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload patched sources on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-patched-sources
+          path: |
+            apply_web_proxy_patch.py
+            WebProxyTransport.java
+            protocol_vectors_test.py
+            Telegram/TMessagesProj/src/main/java/org/telegram/messenger/SharedConfig.java
+            Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
+            Telegram/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
+            Telegram/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
+          if-no-files-found: ignore
+          retention-days: 3
