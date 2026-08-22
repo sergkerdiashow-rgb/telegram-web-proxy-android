@@ -163,6 +163,19 @@ jobs:
               total += count
           path.write_text(text)
           print(f"remapped {total} launcher icon reference(s)")
+
+          # :jlatexmath is a plain library with only debug/release variants, so the
+          # app's standalone build type has nothing to resolve against. The library
+          # module already carries this fallback; the app module never did.
+          app = Path("TMessagesProj_App/build.gradle")
+          text = app.read_text()
+          marker = "        standalone {\n            debuggable false\n"
+          if text.count(marker) != 1:
+              raise SystemExit(f"expected 1 standalone build type, found {text.count(marker)}")
+          text = text.replace(marker,
+              "        standalone {\n            matchingFallbacks = ['release']\n            debuggable false\n")
+          app.write_text(text)
+          print("added matchingFallbacks to the app standalone build type")
           PY
           ! grep -q "_sa" TMessagesProj/config/release/AndroidManifest_standalone.xml
 
