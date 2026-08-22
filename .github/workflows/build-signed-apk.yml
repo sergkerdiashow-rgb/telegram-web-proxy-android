@@ -64,6 +64,8 @@ jobs:
           sdkmanager \
             "platforms;android-35" \
             "build-tools;35.0.0" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
             "ndk;27.2.12479018" \
             "cmake;3.10.2.4988404"
 
@@ -82,6 +84,18 @@ jobs:
           git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
           git -C Telegram submodule update --init --recursive --depth=1
           test "$(git -C Telegram rev-parse HEAD)" = "4e1a61eca6c9b6ee3aa9c35cf8c70554750f2439"
+          # TMessagesProj/build.gradle depends on project(':jlatexmath'), but upstream
+          # settings.gradle never registers it. The submodule keeps the library module
+          # one level down, next to its own sample projects.
+          test -f Telegram/TMessagesProj/lib/jlatexmath/jlatexmath/build.gradle
+          if ! grep -q "':jlatexmath'" Telegram/settings.gradle; then
+            {
+              echo ""
+              echo "include ':jlatexmath'"
+              echo "project(':jlatexmath').projectDir = new File(rootDir, 'TMessagesProj/lib/jlatexmath/jlatexmath')"
+            } >> Telegram/settings.gradle
+          fi
+          cat Telegram/settings.gradle
 
       - name: Apply WEB proxy Android POC
         shell: bash
