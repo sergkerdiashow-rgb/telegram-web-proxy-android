@@ -74,10 +74,10 @@ jobs:
           mkdir Telegram
           git -C Telegram init
           git -C Telegram remote add origin https://github.com/DrKLO/Telegram.git
-          git -C Telegram fetch --depth=1 origin 45ab8f4308496e1f01026a97fcdb0d58a5274474
+          git -C Telegram fetch --depth=1 origin 4e1a61eca6c9b6ee3aa9c35cf8c70554750f2439
           git -C Telegram checkout --detach FETCH_HEAD
           git -C Telegram submodule update --init --recursive --depth=1
-          test "$(git -C Telegram rev-parse HEAD)" = "45ab8f4308496e1f01026a97fcdb0d58a5274474"
+          test "$(git -C Telegram rev-parse HEAD)" = "4e1a61eca6c9b6ee3aa9c35cf8c70554750f2439"
 
       - name: Apply WEB proxy Android POC
         shell: bash
