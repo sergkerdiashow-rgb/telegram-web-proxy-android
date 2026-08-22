@@ -120,6 +120,34 @@ jobs:
           edit("TMessagesProj_App/build.gradle", "ndk.debugSymbolLevel = 'FULL'", "ndk.debugSymbolLevel = 'NONE'", 3)
           PY
 
+      - name: Remap standalone launcher icons
+        working-directory: Telegram
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # The standalone manifest points at *_sa launcher icons. Telegram keeps those
+          # adaptive-icon XMLs out of the open source tree, so aapt cannot link them.
+          # Remap each one onto the published icon of the same name.
+          path = Path("TMessagesProj/config/release/AndroidManifest_standalone.xml")
+          text = path.read_text()
+          names = ["ic_launcher", "icon_2_launcher", "icon_3_launcher",
+                   "icon_4_launcher", "icon_5_launcher", "icon_6_launcher"]
+          total = 0
+          for name in names:
+              old = f"@mipmap/{name}_sa"
+              count = text.count(old)
+              if count == 0:
+                  raise SystemExit(f"expected {old} in the standalone manifest")
+              text = text.replace(old, f"@mipmap/{name}")
+              total += count
+          path.write_text(text)
+          print(f"remapped {total} launcher icon reference(s)")
+          PY
+          ! grep -q "_sa" TMessagesProj/config/release/AndroidManifest_standalone.xml
+
       - name: Install signing key
         id: signing
         shell: bash
