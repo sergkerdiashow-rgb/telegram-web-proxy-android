@@ -76,6 +76,10 @@ jobs:
           git -C Telegram remote add origin https://github.com/DrKLO/Telegram.git
           git -C Telegram fetch --depth=1 origin 4e1a61eca6c9b6ee3aa9c35cf8c70554750f2439
           git -C Telegram checkout --detach FETCH_HEAD
+          # 12.10.0 added TMessagesProj/lib/jlatexmath with an ssh remote. A CI runner
+          # has no key for github.com, so rewrite ssh remotes to https for the clone.
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
           git -C Telegram submodule update --init --recursive --depth=1
           test "$(git -C Telegram rev-parse HEAD)" = "4e1a61eca6c9b6ee3aa9c35cf8c70554750f2439"
 
