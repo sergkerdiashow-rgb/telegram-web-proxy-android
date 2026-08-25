@@ -1,0 +1,374 @@
+name: Build signed WEB Proxy APK 12.10.1
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ upgrade/telegram-12.10.1 ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      TELEGRAM_BASE: 62b56a07ca7e30e39f7fd00a6728d6bbd716ca1c
+      CMAKE_BUILD_PARALLEL_LEVEL: 4
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx5g
+
+    steps:
+      - name: Checkout WEB proxy kit
+        uses: actions/checkout@v4
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk \
+                      /opt/ghc /usr/local/share/boost /usr/local/lib/node_modules \
+                      /usr/share/swift /usr/local/.ghcup "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          df -h /
+
+      - name: Reconstruct reviewed WEB proxy sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat chunks/*.txt | base64 --decode | gzip --decompress > ci_bundle.py
+          python3 ci_bundle.py
+          python3 -m py_compile apply_web_proxy_patch.py protocol_vectors_test.py
+          python3 protocol_vectors_test.py
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android command-line tools
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK, NDK and CMake
+        shell: bash
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.2.12479018" \
+            "cmake;3.22.1"
+
+      - name: Checkout pinned Telegram Android 12.10.1
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir Telegram
+          git -C Telegram init
+          git -C Telegram remote add origin https://github.com/DrKLO/Telegram.git
+          git -C Telegram fetch --depth=1 origin "$TELEGRAM_BASE"
+          git -C Telegram checkout --detach FETCH_HEAD
+          git -C Telegram submodule update --init --recursive --depth=1
+          test "$(git -C Telegram rev-parse HEAD)" = "$TELEGRAM_BASE"
+          grep -q "compileSdkVersion 36" Telegram/TMessagesProj/build.gradle
+          grep -q "version '3.22.1'" Telegram/TMessagesProj/build.gradle
+          grep -q "include ':jlatexmath'" Telegram/settings.gradle
+          grep -q "APP_VERSION_NAME=12.10.1" Telegram/gradle.properties
+          grep -q "APP_VERSION_CODE=7038" Telegram/gradle.properties
+
+      - name: Apply WEB proxy implementation
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 apply_web_proxy_patch.py Telegram --dry-run
+          python3 apply_web_proxy_patch.py Telegram
+
+      - name: Add disposable isolated WebView profile hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java")
+          text = path.read_text()
+
+          def once(old, new, label):
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one match, found {count}")
+              text = text.replace(old, new, 1)
+
+          once(
+              "import androidx.webkit.JavaScriptReplyProxy;\n",
+              "import androidx.webkit.JavaScriptReplyProxy;\nimport androidx.webkit.ProfileStore;\n",
+              "ProfileStore import",
+          )
+          once(
+              "    private final ConcurrentHashMap<Integer, LocalStream> streams = new ConcurrentHashMap<>();\n",
+              "    private final ConcurrentHashMap<Integer, LocalStream> streams = new ConcurrentHashMap<>();\n"
+              "    private final ConcurrentHashMap<WebView, String> disposableProfiles = new ConcurrentHashMap<>();\n",
+              "profile registry",
+          )
+          once(
+              "            Context context = ApplicationLoader.applicationContext;\n"
+              "            WebView view = new WebView(context);\n"
+              "            webView = view;\n\n"
+              "            WebSettings settings = view.getSettings();\n",
+              "            Context context = ApplicationLoader.applicationContext;\n"
+              "            WebView view = new WebView(context);\n"
+              "            webView = view;\n"
+              "            if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {\n"
+              "                // Isolate WEB-proxy browser state from Mini Apps, payments and other WebViews.\n"
+              "                String profileName = randomProfileName();\n"
+              "                disposableProfiles.put(view, profileName);\n"
+              "                WebViewCompat.setProfile(view, profileName);\n"
+              "            }\n\n"
+              "            WebSettings settings = view.getSettings();\n",
+              "profile assignment",
+          )
+          once(
+              "    private String randomToken() {\n"
+              "        byte[] bytes = new byte[32];\n"
+              "        random.nextBytes(bytes);\n"
+              "        return android.util.Base64.encodeToString(bytes,\n"
+              "                android.util.Base64.URL_SAFE | android.util.Base64.NO_WRAP | android.util.Base64.NO_PADDING);\n"
+              "    }\n",
+              "    private String randomToken() {\n"
+              "        byte[] bytes = new byte[32];\n"
+              "        random.nextBytes(bytes);\n"
+              "        return android.util.Base64.encodeToString(bytes,\n"
+              "                android.util.Base64.URL_SAFE | android.util.Base64.NO_WRAP | android.util.Base64.NO_PADDING);\n"
+              "    }\n\n"
+              "    private String randomProfileName() {\n"
+              "        byte[] bytes = new byte[16];\n"
+              "        random.nextBytes(bytes);\n"
+              "        StringBuilder result = new StringBuilder(\"telegram_web_proxy_\");\n"
+              "        for (byte value : bytes) {\n"
+              "            result.append(String.format(Locale.US, \"%02x\", value & 0xff));\n"
+              "        }\n"
+              "        return result.toString();\n"
+              "    }\n",
+              "profile name helper",
+          )
+          once(
+              "    private static void destroyWebView(WebView view) {\n"
+              "        try { WebViewCompat.removeWebMessageListener(view, JS_OBJECT); } catch (Throwable ignore) { }\n"
+              "        try { view.stopLoading(); } catch (Throwable ignore) { }\n"
+              "        try { view.loadUrl(\"about:blank\"); } catch (Throwable ignore) { }\n"
+              "        try { view.clearHistory(); } catch (Throwable ignore) { }\n"
+              "        try { view.removeAllViews(); } catch (Throwable ignore) { }\n"
+              "        try { view.destroy(); } catch (Throwable ignore) { }\n"
+              "    }\n",
+              "    private void destroyWebView(WebView view) {\n"
+              "        String profileName = disposableProfiles.remove(view);\n"
+              "        try { WebViewCompat.removeWebMessageListener(view, JS_OBJECT); } catch (Throwable ignore) { }\n"
+              "        try { view.stopLoading(); } catch (Throwable ignore) { }\n"
+              "        try { view.loadUrl(\"about:blank\"); } catch (Throwable ignore) { }\n"
+              "        try { view.clearHistory(); } catch (Throwable ignore) { }\n"
+              "        try { view.removeAllViews(); } catch (Throwable ignore) { }\n"
+              "        try { view.destroy(); } catch (Throwable ignore) { }\n"
+              "        if (profileName != null && WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {\n"
+              "            try { ProfileStore.getInstance().deleteProfile(profileName); } catch (Throwable t) {\n"
+              "                FileLog.e(TAG + \": disposable WebView profile cleanup failed\", t);\n"
+              "            }\n"
+              "        }\n"
+              "    }\n",
+              "profile deletion",
+          )
+
+          path.write_text(text)
+          PY
+          grep -q 'WebViewFeature.MULTI_PROFILE' Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
+          grep -q 'WebViewCompat.setProfile(view, profileName)' Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
+          grep -q 'ProfileStore.getInstance().deleteProfile(profileName)' Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
+
+      - name: Inject private Telegram API credentials only
+        shell: bash
+        env:
+          ALL_ACTION_SECRETS: ${{ toJSON(secrets) }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+
+          secrets = json.loads(os.environ.get("ALL_ACTION_SECRETS", "{}"))
+
+          id_exact = [
+              "TELEGRAM_API_ID", "TG_API_ID", "API_ID", "APIID", "APP_ID",
+              "TELEGRAM_APP_ID", "TG_APP_ID", "TELEGRAM_ID"
+          ]
+          hash_exact = [
+              "TELEGRAM_API_HASH", "TG_API_HASH", "API_HASH", "APIHASH", "APP_HASH",
+              "TELEGRAM_APP_HASH", "TG_APP_HASH", "TELEGRAM_HASH"
+          ]
+
+          def first_exact(names, validator):
+              for name in names:
+                  value = str(secrets.get(name, "")).strip()
+                  if validator(value):
+                      return name, value
+              return None
+
+          valid_id = lambda v: v.isdigit() and 0 < int(v) != 4
+          valid_hash = lambda v: re.fullmatch(r"[0-9a-fA-F]{32}", v) is not None
+
+          id_pick = first_exact(id_exact, valid_id)
+          hash_pick = first_exact(hash_exact, valid_hash)
+
+          if id_pick is None:
+              candidates = [(k, str(v).strip()) for k, v in secrets.items()
+                            if "ID" in k.upper()
+                            and any(tag in k.upper() for tag in ("API", "TELEGRAM", "TG"))
+                            and "SIGN" not in k.upper() and valid_id(str(v).strip())]
+              if len(candidates) == 1:
+                  id_pick = candidates[0]
+              elif len(candidates) > 1:
+                  raise SystemExit("Ambiguous Telegram API ID secrets: " + ", ".join(k for k, _ in candidates))
+
+          if hash_pick is None:
+              candidates = [(k, str(v).strip()) for k, v in secrets.items()
+                            if "HASH" in k.upper()
+                            and any(tag in k.upper() for tag in ("API", "TELEGRAM", "TG", "APP"))
+                            and "SIGN" not in k.upper() and valid_hash(str(v).strip())]
+              if len(candidates) == 1:
+                  hash_pick = candidates[0]
+              elif len(candidates) > 1:
+                  raise SystemExit("Ambiguous Telegram API hash secrets: " + ", ".join(k for k, _ in candidates))
+
+          if id_pick is None:
+              available = sorted(k for k in secrets if any(tag in k.upper() for tag in ("API", "TELEGRAM", "TG", "APP")))
+              raise SystemExit("Private Telegram API ID not found. Candidate secret names: " + ", ".join(available))
+          if hash_pick is None:
+              available = sorted(k for k in secrets if any(tag in k.upper() for tag in ("API", "TELEGRAM", "TG", "APP")))
+              raise SystemExit("Private Telegram API hash not found. Candidate secret names: " + ", ".join(available))
+
+          id_name, api_id = id_pick
+          hash_name, api_hash = hash_pick
+          path = Path("Telegram/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java")
+          text = path.read_text()
+          text, n1 = re.subn(r"public static int APP_ID = \d+;", f"public static int APP_ID = {api_id};", text, count=1)
+          text, n2 = re.subn(r'public static String APP_HASH = "[0-9a-fA-F]+";', f'public static String APP_HASH = "{api_hash}";', text, count=1)
+          if n1 != 1 or n2 != 1:
+              raise SystemExit(f"BuildVars credential replacement failed: APP_ID={n1}, APP_HASH={n2}")
+          path.write_text(text)
+          print(f"Private Telegram API credentials injected from secrets {id_name} / {hash_name}; values hidden.")
+          PY
+          ! grep -q "public static int APP_ID = 4;" Telegram/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+
+      - name: Restrict native build to ARM64
+        working-directory: Telegram
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def edit(path, old, new, expected):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f"{path}: expected {expected} matches, found {count}")
+              p.write_text(text.replace(old, new))
+
+          edit("TMessagesProj_App/build.gradle",
+               'abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"',
+               'abiFilters "arm64-v8a"', 3)
+          edit("TMessagesProj/build.gradle",
+               "        multiDexEnabled true\n\n        externalNativeBuild {\n",
+               "        multiDexEnabled true\n\n        ndk {\n            abiFilters \"arm64-v8a\"\n        }\n\n        externalNativeBuild {\n", 1)
+          edit("TMessagesProj/build.gradle", "ndk.debugSymbolLevel = 'FULL'", "ndk.debugSymbolLevel = 'NONE'", 6)
+          edit("TMessagesProj_App/build.gradle", "ndk.debugSymbolLevel = 'FULL'", "ndk.debugSymbolLevel = 'NONE'", 3)
+          PY
+
+      - name: Prepare standalone variant
+        working-directory: Telegram
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          manifest = Path("TMessagesProj/config/release/AndroidManifest_standalone.xml")
+          text = manifest.read_text()
+          for name in ["ic_launcher", "icon_2_launcher", "icon_3_launcher", "icon_4_launcher", "icon_5_launcher", "icon_6_launcher"]:
+              old = f"@mipmap/{name}_sa"
+              if old not in text:
+                  raise SystemExit(f"expected {old} in standalone manifest")
+              text = text.replace(old, f"@mipmap/{name}")
+          manifest.write_text(text)
+
+          app = Path("TMessagesProj_App/build.gradle")
+          text = app.read_text()
+          marker = "        standalone {\n            debuggable false\n"
+          if marker not in text:
+              raise SystemExit("standalone build type marker not found")
+          app.write_text(text.replace(marker,
+              "        standalone {\n            matchingFallbacks = ['release']\n            debuggable false\n", 1))
+          PY
+
+      - name: Install required permanent signing identity
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "Signing secrets are incomplete. Refusing to build with another key." >&2
+            exit 1
+          fi
+          mkdir -p ~/.gradle
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > Telegram/TMessagesProj/config/release.keystore
+          {
+            printf 'RELEASE_STORE_PASSWORD=%s\n' "$STORE_PASSWORD"
+            printf 'RELEASE_KEY_ALIAS=%s\n' "$KEY_ALIAS"
+            printf 'RELEASE_KEY_PASSWORD=%s\n' "$KEY_PASSWORD"
+          } > ~/.gradle/gradle.properties
+          chmod 600 ~/.gradle/gradle.properties Telegram/TMessagesProj/config/release.keystore
+
+      - name: Build final signed ARM64 standalone APK
+        working-directory: Telegram
+        shell: bash
+        run: |
+          set -euxo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace --max-workers=4 :TMessagesProj_App:assembleAfatStandalone
+
+      - name: Verify final APK identity ABI and permanent certificate
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APK=Telegram/TMessagesProj_App/build/outputs/apk/afat/standalone/app.apk
+          test -s "$APK"
+          sha256sum "$APK" | tee app.apk.sha256
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$APK" | tee signing-certificate.txt
+          grep -qi '7d91476305e39a1d1ed8f5a6c63c93f40bea3ea49afb1e9115343a39cce28920' signing-certificate.txt
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | head -n 5 | tee apk-identity.txt
+          grep -q "package: name='org.telegram.messenger.web'" apk-identity.txt
+          grep -q "versionCode='70389'" apk-identity.txt
+          grep -q "versionName='12.10.1'" apk-identity.txt
+          unzip -l "$APK" | grep 'lib/' | awk '{print $4}' | cut -d/ -f2 | sort -u | tee apk-abis.txt
+          grep -qx 'arm64-v8a' apk-abis.txt
+          test "$(wc -l < apk-abis.txt)" -eq 1
+
+      - name: Upload final APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-web-proxy-12.10.1-final-arm64
+          path: |
+            Telegram/TMessagesProj_App/build/outputs/apk/afat/standalone/app.apk
+            app.apk.sha256
+            signing-certificate.txt
+            apk-identity.txt
+            apk-abis.txt
+          if-no-files-found: error
+          retention-days: 7
