@@ -101,6 +101,47 @@ jobs:
         shell: bash
         run: python3 apply_web_proxy_patch.py Telegram
 
+      - name: Inject saved Telegram API credentials
+        shell: bash
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID || secrets.API_ID || secrets.APP_ID || secrets.TELEGRAM_APP_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH || secrets.API_HASH || secrets.APP_HASH || secrets.TELEGRAM_APP_HASH }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TELEGRAM_API_ID" ] || [ -z "$TELEGRAM_API_HASH" ]; then
+            echo "::error::Saved Telegram API credentials were not found in repository secrets. Supported names: TELEGRAM_API_ID/API_ID/APP_ID/TELEGRAM_APP_ID and TELEGRAM_API_HASH/API_HASH/APP_HASH/TELEGRAM_APP_HASH."
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          api_id = os.environ["TELEGRAM_API_ID"].strip()
+          api_hash = os.environ["TELEGRAM_API_HASH"].strip()
+          if not re.fullmatch(r"\d+", api_id):
+              raise SystemExit("Telegram API ID secret is not numeric")
+          if not re.fullmatch(r"[0-9a-fA-F]{32}", api_hash):
+              raise SystemExit("Telegram API hash secret must be 32 hexadecimal characters")
+
+          path = Path("Telegram/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java")
+          text = path.read_text()
+          text, id_count = re.subn(
+              r"public static int APP_ID = \d+;",
+              f"public static int APP_ID = {api_id};",
+              text,
+          )
+          text, hash_count = re.subn(
+              r'public static String APP_HASH = "[^"]*";',
+              f'public static String APP_HASH = "{api_hash}";',
+              text,
+          )
+          if id_count != 1 or hash_count != 1:
+              raise SystemExit(f"BuildVars.java: expected one APP_ID and APP_HASH, got {id_count} and {hash_count}")
+          path.write_text(text)
+          print("Injected Telegram API credentials from GitHub Secrets (values hidden).")
+          PY
+
       - name: Restrict native build to ARM64
         working-directory: Telegram
         shell: bash
