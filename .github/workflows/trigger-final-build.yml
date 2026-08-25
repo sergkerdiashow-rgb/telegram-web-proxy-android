@@ -1,0 +1,19 @@
+name: Trigger hardened final APK build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch final 12.10.1 build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build-signed-12.10.1.yml --ref main
