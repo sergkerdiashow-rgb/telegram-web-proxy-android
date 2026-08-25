@@ -200,42 +200,19 @@ jobs:
       - name: Inject private Telegram API credentials only
         shell: bash
         env:
-          ALL_ACTION_SECRETS: ${{ toJSON(secrets) }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID || secrets.TG_API_ID || secrets.API_ID || secrets.APIID || secrets.APP_ID || secrets.TELEGRAM_APP_ID || secrets.TG_APP_ID || secrets.TELEGRAM_ID || secrets.TELEGRAM_APIID || secrets.TG_APIID || secrets.MY_API_ID || secrets.API_ID_TELEGRAM || secrets.TELEGRAM_APPID || secrets.APPID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH || secrets.TG_API_HASH || secrets.API_HASH || secrets.APIHASH || secrets.APP_HASH || secrets.TELEGRAM_APP_HASH || secrets.TG_APP_HASH || secrets.TELEGRAM_HASH || secrets.TELEGRAM_APIHASH || secrets.TG_APIHASH || secrets.MY_API_HASH || secrets.API_HASH_TELEGRAM || secrets.TELEGRAM_APPHASH || secrets.APPHASH }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, re
+          import os, re
           from pathlib import Path
-
-          secrets = json.loads(os.environ.get("ALL_ACTION_SECRETS", "{}"))
-          id_exact = ["TELEGRAM_API_ID", "TG_API_ID", "API_ID", "APIID", "APP_ID", "TELEGRAM_APP_ID", "TG_APP_ID", "TELEGRAM_ID"]
-          hash_exact = ["TELEGRAM_API_HASH", "TG_API_HASH", "API_HASH", "APIHASH", "APP_HASH", "TELEGRAM_APP_HASH", "TG_APP_HASH", "TELEGRAM_HASH"]
-          valid_id = lambda v: v.isdigit() and 0 < int(v) != 4
-          valid_hash = lambda v: re.fullmatch(r"[0-9a-fA-F]{32}", v) is not None
-
-          def first(names, validator):
-              for name in names:
-                  value = str(secrets.get(name, "")).strip()
-                  if validator(value):
-                      return name, value
-              return None
-
-          id_pick = first(id_exact, valid_id)
-          hash_pick = first(hash_exact, valid_hash)
-          if id_pick is None:
-              c = [(k, str(v).strip()) for k, v in secrets.items() if "ID" in k.upper() and any(x in k.upper() for x in ("API","TELEGRAM","TG")) and "SIGN" not in k.upper() and valid_id(str(v).strip())]
-              if len(c) == 1: id_pick = c[0]
-              elif len(c) > 1: raise SystemExit("Ambiguous Telegram API ID secret names: " + ", ".join(k for k,_ in c))
-          if hash_pick is None:
-              c = [(k, str(v).strip()) for k, v in secrets.items() if "HASH" in k.upper() and any(x in k.upper() for x in ("API","TELEGRAM","TG","APP")) and "SIGN" not in k.upper() and valid_hash(str(v).strip())]
-              if len(c) == 1: hash_pick = c[0]
-              elif len(c) > 1: raise SystemExit("Ambiguous Telegram API hash secret names: " + ", ".join(k for k,_ in c))
-          if id_pick is None or hash_pick is None:
-              names = sorted(k for k in secrets if any(x in k.upper() for x in ("API","TELEGRAM","TG","APP")))
-              raise SystemExit("Private Telegram API credentials not found. Candidate secret names: " + ", ".join(names))
-
-          id_name, api_id = id_pick
-          hash_name, api_hash = hash_pick
+          api_id = os.environ.get("TELEGRAM_API_ID", "").strip()
+          api_hash = os.environ.get("TELEGRAM_API_HASH", "").strip()
+          if not api_id.isdigit() or int(api_id) <= 0 or int(api_id) == 4:
+              raise SystemExit("Private Telegram API ID secret is missing or invalid")
+          if not re.fullmatch(r"[0-9a-fA-F]{32}", api_hash):
+              raise SystemExit("Private Telegram API hash secret is missing or invalid")
           path = Path("Telegram/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java")
           text = path.read_text()
           text, n1 = re.subn(r"public static int APP_ID = \d+;", f"public static int APP_ID = {api_id};", text, count=1)
@@ -243,7 +220,7 @@ jobs:
           if n1 != 1 or n2 != 1:
               raise SystemExit(f"BuildVars replacement failed: {n1}/{n2}")
           path.write_text(text)
-          print(f"Private Telegram API credentials injected from {id_name} / {hash_name}; values hidden.")
+          print("Private Telegram API credentials injected from GitHub Secrets; values hidden.")
           PY
           ! grep -q "public static int APP_ID = 4;" Telegram/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
 
