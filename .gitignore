@@ -8,3 +8,10 @@ Telegram/
 __pycache__/
 sb2/
 apk/
+
+# Never commit Android signing material
+*.keystore
+*.jks
+*.p12
+*.pfx
+signing-secrets.txt
