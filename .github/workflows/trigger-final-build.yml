@@ -16,4 +16,4 @@ jobs:
       - name: Dispatch final 12.10.1 build
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run build-signed-12.10.1.yml --ref main
+        run: gh workflow run build-signed-12.10.1.yml --repo sergkerdiashow-rgb/telegram-web-proxy-android --ref main
