@@ -1,0 +1,55 @@
+name: Check private API credential source
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate API credentials without printing values
+        shell: bash
+        env:
+          API_ID_SECRET: ${{ secrets.TELEGRAM_API_ID || secrets.TG_API_ID || secrets.API_ID || secrets.APIID || secrets.APP_ID || secrets.TELEGRAM_APP_ID || secrets.TG_APP_ID || secrets.TELEGRAM_ID || secrets.TELEGRAM_APIID || secrets.TG_APIID || secrets.MY_API_ID || secrets.API_ID_TELEGRAM || secrets.TELEGRAM_APPID || secrets.APPID }}
+          API_HASH_SECRET: ${{ secrets.TELEGRAM_API_HASH || secrets.TG_API_HASH || secrets.API_HASH || secrets.APIHASH || secrets.APP_HASH || secrets.TELEGRAM_APP_HASH || secrets.TG_APP_HASH || secrets.TELEGRAM_HASH || secrets.TELEGRAM_APIHASH || secrets.TG_APIHASH || secrets.MY_API_HASH || secrets.API_HASH_TELEGRAM || secrets.TELEGRAM_APPHASH || secrets.APPHASH }}
+          API_ID_VAR: ${{ vars.TELEGRAM_API_ID || vars.TG_API_ID || vars.API_ID || vars.APIID || vars.APP_ID || vars.TELEGRAM_APP_ID || vars.TG_APP_ID || vars.TELEGRAM_ID || vars.TELEGRAM_APIID || vars.TG_APIID || vars.MY_API_ID || vars.API_ID_TELEGRAM || vars.TELEGRAM_APPID || vars.APPID }}
+          API_HASH_VAR: ${{ vars.TELEGRAM_API_HASH || vars.TG_API_HASH || vars.API_HASH || vars.APIHASH || vars.APP_HASH || vars.TELEGRAM_APP_HASH || vars.TG_APP_HASH || vars.TELEGRAM_HASH || vars.TELEGRAM_APIHASH || vars.TG_APIHASH || vars.MY_API_HASH || vars.API_HASH_TELEGRAM || vars.TELEGRAM_APPHASH || vars.APPHASH }}
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re
+
+          sid = os.environ.get('API_ID_SECRET', '').strip()
+          shash = os.environ.get('API_HASH_SECRET', '').strip()
+          vid = os.environ.get('API_ID_VAR', '').strip()
+          vhash = os.environ.get('API_HASH_VAR', '').strip()
+
+          valid_id = lambda v: v.isdigit() and int(v) > 0 and int(v) != 4
+          valid_hash = lambda v: re.fullmatch(r'[0-9a-fA-F]{32}', v) is not None
+
+          if valid_id(sid) and valid_hash(shash):
+              print('API_SOURCE=actions_secret')
+          elif valid_id(vid) and valid_hash(vhash):
+              print('API_SOURCE=actions_variable')
+          else:
+              print('API_SOURCE=not_found')
+              print('API_ID_SECRET_VALID=' + str(valid_id(sid)).lower())
+              print('API_HASH_SECRET_VALID=' + str(valid_hash(shash)).lower())
+              print('API_ID_VAR_VALID=' + str(valid_id(vid)).lower())
+              print('API_HASH_VAR_VALID=' + str(valid_hash(vhash)).lower())
+              raise SystemExit(2)
+
+          signing = all(os.environ.get(k, '').strip() for k in (
+              'SIGNING_KEYSTORE_BASE64', 'SIGNING_KEYSTORE_PASSWORD',
+              'SIGNING_KEY_ALIAS', 'SIGNING_KEY_PASSWORD'))
+          print('SIGNING_SECRETS_PRESENT=' + str(signing).lower())
+          PY
