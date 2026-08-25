@@ -17,6 +17,8 @@ jobs:
     env:
       GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx5g
       CMAKE_BUILD_PARALLEL_LEVEL: 4
+      TELEGRAM_BASE: 62b56a07ca7e30e39f7fd00a6728d6bbd716ca1c
+      OLD_TELEGRAM_BASE: 4e1a61eca6c9b6ee3aa9c35cf8c70554750f2439
 
     steps:
       - name: Checkout POC kit
@@ -40,6 +42,26 @@ jobs:
           set -euxo pipefail
           cat chunks/*.txt | base64 --decode | gzip --decompress > ci_bundle.py
           python3 ci_bundle.py
+
+          # Test the current reviewed POC against the new upstream commit without
+          # rewriting the reviewed chunks yet. If compatibility is proven by CI,
+          # the bundle itself can be repinned in a separate reviewed change.
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          old = os.environ["OLD_TELEGRAM_BASE"]
+          new = os.environ["TELEGRAM_BASE"]
+          for name in ("apply_web_proxy_patch.py", "protocol_vectors_test.py"):
+              p = Path(name)
+              text = p.read_text()
+              count = text.count(old)
+              if count < 1:
+                  raise SystemExit(f"{name}: expected pinned base {old} not found")
+              p.write_text(text.replace(old, new))
+              print(f"{name}: repinned {count} occurrence(s) to {new}")
+          PY
+
           python3 -m py_compile apply_web_proxy_patch.py protocol_vectors_test.py
           python3 protocol_vectors_test.py
 
@@ -58,12 +80,10 @@ jobs:
           set -euxo pipefail
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
             "platforms;android-36" \
             "build-tools;36.0.0" \
             "ndk;27.2.12479018" \
-            "cmake;3.10.2.4988404"
+            "cmake;3.22.1"
 
       - name: Checkout pinned Telegram Android source
         shell: bash
@@ -72,26 +92,20 @@ jobs:
           mkdir Telegram
           git -C Telegram init
           git -C Telegram remote add origin https://github.com/DrKLO/Telegram.git
-          git -C Telegram fetch --depth=1 origin 4e1a61eca6c9b6ee3aa9c35cf8c70554750f2439
+          git -C Telegram fetch --depth=1 origin "$TELEGRAM_BASE"
           git -C Telegram checkout --detach FETCH_HEAD
-          # 12.10.0 added TMessagesProj/lib/jlatexmath with an ssh remote. A CI runner
-          # has no key for github.com, so rewrite ssh remotes to https for the clone.
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
           git -C Telegram submodule update --init --recursive --depth=1
-          test "$(git -C Telegram rev-parse HEAD)" = "4e1a61eca6c9b6ee3aa9c35cf8c70554750f2439"
-          # TMessagesProj/build.gradle depends on project(':jlatexmath'), but upstream
-          # settings.gradle never registers it. The submodule keeps the library module
-          # one level down, next to its own sample projects.
+          test "$(git -C Telegram rev-parse HEAD)" = "$TELEGRAM_BASE"
+
+          # Upstream fixed the missing jlatexmath registration after 12.10.0.
+          # Treat it as an upstream invariant now instead of modifying settings.gradle.
+          grep -q "include ':jlatexmath'" Telegram/settings.gradle
+          grep -q "project(':jlatexmath').projectDir" Telegram/settings.gradle
           test -f Telegram/TMessagesProj/lib/jlatexmath/jlatexmath/build.gradle
-          if ! grep -q "':jlatexmath'" Telegram/settings.gradle; then
-            {
-              echo ""
-              echo "include ':jlatexmath'"
-              echo "project(':jlatexmath').projectDir = new File(rootDir, 'TMessagesProj/lib/jlatexmath/jlatexmath')"
-            } >> Telegram/settings.gradle
-          fi
-          cat Telegram/settings.gradle
+
+          # 12.10.1 moved the Android build to API 36 / CMake 3.22.1.
+          grep -q "compileSdkVersion 36" Telegram/TMessagesProj/build.gradle
+          grep -q "version '3.22.1'" Telegram/TMessagesProj/build.gradle
 
       - name: Verify patch compatibility
         shell: bash
@@ -118,7 +132,7 @@ jobs:
               p.write_text(text.replace(old, new))
               print(f"{path}: replaced {count} occurrence(s)")
 
-          # The app module only controls which ABIs get packaged.
+          # The app module controls packaging.
           edit(
               "TMessagesProj_App/build.gradle",
               'abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"',
@@ -126,8 +140,8 @@ jobs:
               3,
           )
 
-          # The library module owns the CMake tasks. Without abiFilters here AGP
-          # still builds every supported ABI, which is what blew up the runner disk.
+          # The library module owns the CMake tasks. Restrict it too or AGP still
+          # builds every ABI and can exhaust the GitHub runner disk.
           edit(
               "TMessagesProj/build.gradle",
               "        multiDexEnabled true\n\n        externalNativeBuild {\n",
@@ -136,7 +150,7 @@ jobs:
               1,
           )
 
-          # Native debug symbol packaging costs gigabytes and is useless for this POC.
+          # Native debug symbol packaging costs gigabytes and is not useful here.
           edit("TMessagesProj/build.gradle", "ndk.debugSymbolLevel = 'FULL'", "ndk.debugSymbolLevel = 'NONE'", 6)
           edit("TMessagesProj_App/build.gradle", "ndk.debugSymbolLevel = 'FULL'", "ndk.debugSymbolLevel = 'NONE'", 3)
           PY
@@ -171,25 +185,30 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: telegram-web-proxy-android-poc-arm64
+          name: telegram-web-proxy-android-12.10.1-arm64
           path: |
             Telegram/TMessagesProj_App/build/outputs/apk/afat/debug/app.apk
             app.apk.sha256
           if-no-files-found: error
           retention-days: 7
 
-      - name: Upload patched sources on failure
-        if: failure()
+      - name: Upload audit sources
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-patched-sources
+          name: audit-patched-sources-12.10.1
           path: |
             apply_web_proxy_patch.py
             WebProxyTransport.java
             protocol_vectors_test.py
             Telegram/TMessagesProj/src/main/java/org/telegram/messenger/SharedConfig.java
             Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
+            Telegram/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsService.java
             Telegram/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
             Telegram/TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java
+            Telegram/TMessagesProj/src/main/java/org/telegram/ui/ProxyListActivity.java
+            Telegram/TMessagesProj/src/main/AndroidManifest.xml
+            Telegram/TMessagesProj/config/debug/AndroidManifest.xml
+            Telegram/TMessagesProj/config/release/AndroidManifest.xml
           if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 7
