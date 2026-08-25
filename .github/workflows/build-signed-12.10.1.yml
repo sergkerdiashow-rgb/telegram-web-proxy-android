@@ -3,7 +3,7 @@ name: Build signed WEB Proxy APK 12.10.1
 on:
   workflow_dispatch:
   push:
-    branches: [ upgrade/telegram-12.10.1 ]
+    branches: [ main ]
 
 permissions:
   contents: read
