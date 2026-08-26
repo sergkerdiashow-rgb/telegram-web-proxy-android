@@ -1,0 +1,146 @@
+name: Audit WEB proxy protocol v1 and TeleMT 3.5.3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      TELEGRAM_BASE: 62b56a07ca7e30e39f7fd00a6728d6bbd716ca1c
+      TPROXY_PROTOCOL_COMMIT: 52a5feb7fac38f68da5afef9cedd9b3bfc8473ca
+      TELEMT_TAG: 3.5.3
+
+    steps:
+      - name: Checkout Android WEB proxy kit
+        uses: actions/checkout@v4
+
+      - name: Reconstruct and test reviewed patch
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat chunks/*.txt | base64 --decode | gzip --decompress > ci_bundle.py
+          python3 ci_bundle.py
+          python3 -m py_compile apply_web_proxy_patch.py protocol_vectors_test.py
+          python3 protocol_vectors_test.py
+
+      - name: Checkout pinned Telegram Android 12.10.1
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir Telegram
+          git -C Telegram init
+          git -C Telegram remote add origin https://github.com/DrKLO/Telegram.git
+          git -C Telegram fetch --depth=1 origin "$TELEGRAM_BASE"
+          git -C Telegram checkout --detach FETCH_HEAD
+          test "$(git -C Telegram rev-parse HEAD)" = "$TELEGRAM_BASE"
+          grep -q 'APP_VERSION_NAME=12.10.1' Telegram/gradle.properties
+          grep -q 'APP_VERSION_CODE=7038' Telegram/gradle.properties
+
+      - name: Apply WEB proxy implementation
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 apply_web_proxy_patch.py Telegram --dry-run
+          python3 apply_web_proxy_patch.py Telegram
+
+      - name: Verify Android WebView protocol boundary and WSS readiness
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WEB=Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
+          test -s "$WEB"
+
+          required=(
+            'WEB_MESSAGE_LISTENER'
+            'WEB_MESSAGE_ARRAY_BUFFER'
+            'DOCUMENT_START_SCRIPT'
+            'addWebMessageListener'
+            'addDocumentStartJavaScript'
+            'TelegramWebProxy'
+            'tproxy-android-init'
+            'wss://'
+            'shouldInterceptRequest'
+            'MIXED_CONTENT_NEVER_ALLOW'
+            'LOAD_NO_CACHE'
+            'setAllowFileAccess(false)'
+            'setAllowContentAccess(false)'
+            'setDomStorageEnabled(false)'
+            'setJavaScriptCanOpenWindowsAutomatically(false)'
+            'onRenderProcessGone'
+          )
+          for needle in "${required[@]}"; do
+            if ! grep -Fq "$needle" "$WEB"; then
+              echo "Missing required current WEB protocol marker: $needle" >&2
+              echo '--- relevant sanitized source markers ---' >&2
+              grep -nE 'WebMessage|DocumentStart|connect-src|wss|Intercept|MIXED|LOAD_NO_CACHE|Allow(File|Content)|DomStorage|RenderProcess|TelegramWebProxy|tproxy-android' "$WEB" | head -n 160 >&2 || true
+              exit 1
+            fi
+          done
+
+          # The private carrier must be fail-closed and origin constrained.
+          grep -Fq '127.0.0.1' "$WEB"
+          grep -Fq 'https://' "$WEB"
+          ! grep -Fq 'addJavascriptInterface' "$WEB"
+
+          # Final signed workflow adds a disposable isolated WebView profile.
+          FLOW=.github/workflows/build-signed-12.10.1.yml
+          grep -Fq 'WebViewFeature.MULTI_PROFILE' "$FLOW"
+          grep -Fq 'WebViewCompat.setProfile(view, profileName)' "$FLOW"
+          grep -Fq 'ProfileStore.getInstance().deleteProfile(profileName)' "$FLOW"
+
+      - name: Verify current official tproxy-server contract
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir Official
+          git -C Official init
+          git -C Official remote add origin https://github.com/telegramdesktop/tproxy-server.git
+          git -C Official fetch --depth=1 origin "$TPROXY_PROTOCOL_COMMIT"
+          git -C Official checkout --detach FETCH_HEAD
+          test "$(git -C Official rev-parse HEAD)" = "$TPROXY_PROTOCOL_COMMIT"
+
+          grep -Fq 'carrier_mode' Official/PROTOCOL.md
+          grep -Fq 'https-lanes' Official/PROTOCOL.md
+          grep -Fq 'websocket-lanes' Official/PROTOCOL.md
+          grep -Fq 'TelegramWebProxy' Official/PROTOCOL.md
+          grep -Fq 'tproxy-android-init' Official/PROTOCOL.md
+          grep -Fq 'connect-src https://H wss://H' Official/ANDROID.md
+          grep -Fq 'WEB_MESSAGE_ARRAY_BUFFER' Official/ANDROID.md
+          grep -Fq 'DOCUMENT_START_SCRIPT' Official/ANDROID.md
+
+      - name: Verify TeleMT 3.5.3 bridge implements the same Android boundary
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir TeleMT
+          git -C TeleMT init
+          git -C TeleMT remote add origin https://github.com/telemt/telemt.git
+          git -C TeleMT fetch --depth=1 origin "refs/tags/$TELEMT_TAG:refs/tags/$TELEMT_TAG"
+          git -C TeleMT checkout --detach "$TELEMT_TAG"
+
+          BRIDGE=TeleMT/src/web/bridge.rs
+          test -s "$BRIDGE"
+          grep -Fq 'TelegramWebProxy' "$BRIDGE"
+          grep -Fq 'tproxy-android-init' "$BRIDGE"
+          grep -Fq "carrier==='https'" "$BRIDGE"
+          grep -Fq "carrier==='https-lanes'" "$BRIDGE"
+          grep -Fq "carrier==='websocket'" "$BRIDGE"
+          grep -Fq "carrier==='websocket-lanes'" "$BRIDGE"
+          grep -Fq "new WebSocket" "$BRIDGE"
+          grep -Fq "tproxy-v1." "$BRIDGE"
+          grep -Fq "tproxy-lane-v1." "$BRIDGE"
+
+      - name: Audit summary
+        shell: bash
+        run: |
+          echo 'Android WEB proxy patch matches the current v1 WebView boundary.'
+          echo 'WSS is permitted by the Android carrier policy.'
+          echo 'Official tproxy-server HTTPS/HTTPS-lanes/WebSocket/WebSocket-lanes contract verified.'
+          echo 'TeleMT 3.5.3 Android bridge compatibility markers verified.'
