@@ -1,0 +1,30 @@
+name: Export WEB proxy diagnostic sources
+
+on:
+  push:
+    branches: [ diagnose-webproxy ]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct reviewed sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat chunks/*.txt | base64 --decode | gzip --decompress > ci_bundle.py
+          python3 ci_bundle.py
+          python3 -m py_compile apply_web_proxy_patch.py protocol_vectors_test.py
+      - name: Upload reconstructed diagnostic sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: webproxy-diagnostic-sources
+          path: |
+            ci_bundle.py
+            apply_web_proxy_patch.py
+            protocol_vectors_test.py
+          retention-days: 1
