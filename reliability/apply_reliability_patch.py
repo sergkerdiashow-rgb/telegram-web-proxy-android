@@ -12,6 +12,21 @@ def replace_once(path: Path, old: str, new: str, label: str):
         raise SystemExit(f'{label}: expected one match, got {count}')
     path.write_text(text.replace(old, new, 1))
 
+# Keep the reliability transport aligned with the Android 12.10.1 compile SDK APIs.
+transport = root / 'TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java'
+replace_once(
+    transport,
+    'view.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false, -1);',
+    'view.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);',
+    'WebView renderer priority signature',
+)
+replace_once(
+    transport,
+    'if (callback != null) callback.invoke(origin, false, false, -1);',
+    'if (callback != null) callback.invoke(origin, false, false);',
+    'WebView callback signature',
+)
+
 # Make WEB keep-alive mandatory while WEB proxy is selected and start it via
 # startForegroundService on Android 8+, so the promotion is not merely deferred
 # until the next app restart.
