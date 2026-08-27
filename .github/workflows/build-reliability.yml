@@ -50,6 +50,138 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Validate permanent signing identity early
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_B64" && test -n "$STORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD"
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import os
+          import re
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          expected = '7d91476305e39a1d1ed8f5a6c63c93f40bea3ea49afb1e9115343a39cce28920'
+          raw = os.environ['KEYSTORE_B64'].strip()
+          store_password = os.environ['STORE_PASSWORD']
+          key_alias = os.environ['KEY_ALIAS']
+          key_password = os.environ['KEY_PASSWORD']
+          runner_temp = Path(os.environ['RUNNER_TEMP'])
+          target = runner_temp / 'release.keystore'
+
+          if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+              raw = raw[1:-1].strip()
+          if raw.lower().startswith('data:') and ',' in raw:
+              raw = raw.split(',', 1)[1]
+
+          def decode_b64(text):
+              compact = re.sub(r'\s+', '', text)
+              return base64.b64decode(compact, validate=True)
+
+          candidates = []
+          try:
+              first = decode_b64(raw)
+              candidates.append(('base64', first))
+          except Exception:
+              raise SystemExit('SIGNING_KEYSTORE_BASE64 is not valid base64 text')
+
+          try:
+              first_text = first.decode('ascii').strip()
+          except UnicodeDecodeError:
+              first_text = ''
+
+          if first_text:
+              try:
+                  second = decode_b64(first_text)
+                  if second and second != first:
+                      candidates.append(('double-base64', second))
+              except Exception:
+                  pass
+              compact_hex = re.sub(r'\s+', '', first_text)
+              if len(compact_hex) % 2 == 0 and re.fullmatch(r'[0-9a-fA-F]+', compact_hex or ''):
+                  try:
+                      decoded_hex = bytes.fromhex(compact_hex)
+                      if decoded_hex and all(decoded_hex != data for _, data in candidates):
+                          candidates.append(('base64-then-hex', decoded_hex))
+                  except ValueError:
+                      pass
+
+          failures = []
+          accepted = None
+          for label, data in candidates:
+              candidate = runner_temp / f'release.{label}.keystore'
+              candidate.write_bytes(data)
+
+              listed = subprocess.run(
+                  ['keytool', '-list', '-keystore', str(candidate), '-storepass', store_password, '-alias', key_alias],
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+              )
+              if listed.returncode != 0:
+                  failures.append(f'{label}: keytool rejected keystore/alias/store password')
+                  continue
+
+              with tempfile.TemporaryDirectory() as tmp:
+                  probe_dir = Path(tmp)
+                  (probe_dir / 'probe.txt').write_text('telegram-web-proxy signing probe\n')
+                  probe_jar = probe_dir / 'probe.jar'
+                  made = subprocess.run(
+                      ['jar', 'cf', str(probe_jar), '-C', str(probe_dir), 'probe.txt'],
+                      stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL,
+                  )
+                  if made.returncode != 0:
+                      raise SystemExit('Unable to create signing probe jar')
+                  signed = subprocess.run(
+                      ['jarsigner', '-keystore', str(candidate), '-storepass', store_password,
+                       '-keypass', key_password, str(probe_jar), key_alias],
+                      stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL,
+                  )
+                  if signed.returncode != 0:
+                      failures.append(f'{label}: alias exists but private key/key password is unusable')
+                      continue
+
+              cert = runner_temp / f'certificate.{label}.der'
+              exported = subprocess.run(
+                  ['keytool', '-exportcert', '-alias', key_alias, '-keystore', str(candidate),
+                   '-storepass', store_password, '-file', str(cert)],
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+              )
+              if exported.returncode != 0 or not cert.exists():
+                  failures.append(f'{label}: certificate export failed')
+                  continue
+              fingerprint = hashlib.sha256(cert.read_bytes()).hexdigest()
+              if fingerprint.lower() != expected:
+                  failures.append(f'{label}: certificate SHA-256 mismatch ({fingerprint.lower()})')
+                  continue
+
+              target.write_bytes(data)
+              accepted = label
+              break
+
+          for _, data in candidates:
+              data = b''
+
+          if accepted is None:
+              print('Signing keystore validation failed safely. Candidate results:')
+              for item in failures:
+                  print(' - ' + item)
+              raise SystemExit('No decoded signing candidate matches the required permanent private key')
+
+          os.chmod(target, 0o600)
+          print(f'Permanent signing identity validated ({accepted}); expected certificate SHA-256 matches.')
+          PY
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
@@ -189,18 +321,17 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon --stacktrace --max-workers=4 :TMessagesProj_App:compileAfatStandaloneJavaWithJavac
 
-      - name: Install permanent signing identity
+      - name: Install validated permanent signing identity
         shell: bash
         env:
-          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          test -n "$KEYSTORE_B64" && test -n "$STORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD"
+          test -s "$RUNNER_TEMP/release.keystore"
           mkdir -p ~/.gradle
-          printf '%s' "$KEYSTORE_B64" | base64 --decode > Telegram/TMessagesProj/config/release.keystore
+          cp "$RUNNER_TEMP/release.keystore" Telegram/TMessagesProj/config/release.keystore
           {
             printf 'RELEASE_STORE_PASSWORD=%s\n' "$STORE_PASSWORD"
             printf 'RELEASE_KEY_ALIAS=%s\n' "$KEY_ALIAS"
