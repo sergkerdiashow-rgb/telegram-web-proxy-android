@@ -212,8 +212,37 @@ jobs:
         working-directory: Telegram
         shell: bash
         run: |
-          set -euxo pipefail
-          ./gradlew --no-daemon --stacktrace --max-workers=4 :TMessagesProj_App:assembleAfatStandalone
+          set +e
+          set -o pipefail
+          ./gradlew --no-daemon --stacktrace --console=plain --max-workers=4 :TMessagesProj_App:assembleAfatStandalone 2>&1 | tee ../gradle-build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            tail -n 400 ../gradle-build.log > ../gradle-failure-tail.txt
+            grep -E 'FAILURE:|What went wrong:|Execution failed for task|error:|CMake Error|ninja:|Caused by:' ../gradle-build.log | tail -n 120 > ../gradle-failure-keylines.txt || true
+            {
+              echo '### Gradle failure key lines'
+              echo '```text'
+              cat ../gradle-failure-keylines.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            while IFS= read -r line; do
+              safe=$(printf '%s' "$line" | sed 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g')
+              printf '::error::%s\n' "$safe"
+            done < ../gradle-failure-keylines.txt
+          fi
+          exit "$status"
+
+      - name: Upload Gradle diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-diagnostics
+          path: |
+            gradle-failure-tail.txt
+            gradle-failure-keylines.txt
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Verify APK
         shell: bash
