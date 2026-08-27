@@ -1,0 +1,206 @@
+name: Build reliability APK same signer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ diagnose-webproxy ]
+    paths:
+      - '.github/workflows/build-reliability-same-signer.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      TELEGRAM_BASE: 62b56a07ca7e30e39f7fd00a6728d6bbd716ca1c
+      CMAKE_BUILD_PARALLEL_LEVEL: 4
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx5g
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk \
+                      /opt/ghc /usr/local/share/boost /usr/local/lib/node_modules \
+                      /usr/share/swift /usr/local/.ghcup "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          df -h /
+
+      - name: Reconstruct WEB proxy patch
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat chunks/*.txt | base64 --decode | gzip --decompress > ci_bundle.py
+          python3 ci_bundle.py
+          python3 -m py_compile apply_web_proxy_patch.py protocol_vectors_test.py reliability/apply_reliability_patch.py
+          python3 protocol_vectors_test.py
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK NDK CMake
+        shell: bash
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+
+      - name: Checkout Telegram Android 12.10.1
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir Telegram
+          git -C Telegram init
+          git -C Telegram remote add origin https://github.com/DrKLO/Telegram.git
+          git -C Telegram fetch --depth=1 origin "$TELEGRAM_BASE"
+          git -C Telegram checkout --detach FETCH_HEAD
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git -C Telegram submodule update --init --recursive --depth=1
+          test "$(git -C Telegram rev-parse HEAD)" = "$TELEGRAM_BASE"
+          grep -q "APP_VERSION_NAME=12.10.1" Telegram/gradle.properties
+          grep -q "APP_VERSION_CODE=7038" Telegram/gradle.properties
+
+      - name: Apply base WEB proxy
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 apply_web_proxy_patch.py Telegram --dry-run
+          python3 apply_web_proxy_patch.py Telegram
+
+      - name: Apply reliability transport
+        shell: bash
+        run: |
+          set -euxo pipefail
+          base64 --decode reliability/WebProxyTransport.java.gz.b64 | gzip --decompress > Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
+          python3 reliability/apply_reliability_patch.py Telegram
+          grep -q 'carrierEpoch' Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
+          grep -q 'registerDefaultNetworkCallback' Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
+          grep -q 'onRenderProcessUnresponsive' Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
+          grep -q 'SESSION_READY_TIMEOUT_MS = 105_000L' Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
+          grep -q 'ApplicationLoader.startPushService();' Telegram/TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
+          grep -q 'startForegroundService(serviceIntent)' Telegram/TMessagesProj/src/main/java/org/telegram/messenger/ApplicationLoader.java
+
+      - name: Inject private Telegram API credentials
+        shell: bash
+        env:
+          RAW_API: ${{ secrets.API }}
+          API_ID_DIRECT: ${{ secrets.TELEGRAM_API_ID || secrets.TG_API_ID || secrets.API_ID || secrets.APP_ID }}
+          API_HASH_DIRECT: ${{ secrets.TELEGRAM_API_HASH || secrets.TG_API_HASH || secrets.API_HASH || secrets.APP_HASH }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          raw=os.environ.get('RAW_API','').strip(); api_id=os.environ.get('API_ID_DIRECT','').strip(); api_hash=os.environ.get('API_HASH_DIRECT','').strip()
+          good_id=lambda v:v.isdigit() and int(v)>0 and int(v)!=4
+          good_hash=lambda v:re.fullmatch(r'[0-9a-fA-F]{32}',v or '') is not None
+          if raw and not (good_id(api_id) and good_hash(api_hash)):
+              try:
+                  obj=json.loads(raw)
+                  if isinstance(obj,dict):
+                      norm={re.sub(r'[^a-z0-9]','',str(k).lower()):str(v).strip() for k,v in obj.items()}
+                      for k in ('apiid','appid','telegramapiid','telegramappid','id'):
+                          if k in norm and good_id(norm[k]): api_id=norm[k]; break
+                      for k in ('apihash','apphash','telegramapihash','telegramapphash','hash'):
+                          if k in norm and good_hash(norm[k]): api_hash=norm[k]; break
+              except Exception: pass
+          if raw and not good_id(api_id):
+              m=re.search(r'(?i)(?:api|app|telegram)[_\s-]*id\s*[:=]\s*["\']?(\d{2,12})',raw)
+              if m: api_id=m.group(1)
+          if raw and not good_hash(api_hash):
+              m=re.search(r'(?i)(?:api|app|telegram)[_\s-]*hash\s*[:=]\s*["\']?([0-9a-f]{32})',raw)
+              if m: api_hash=m.group(1)
+          if not good_id(api_id): raise SystemExit('Private Telegram api_id not found')
+          if not good_hash(api_hash): raise SystemExit('Private Telegram api_hash not found')
+          p=Path('Telegram/TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java'); t=p.read_text()
+          t,n1=re.subn(r'public static int APP_ID = \d+;',f'public static int APP_ID = {api_id};',t,count=1)
+          t,n2=re.subn(r'public static String APP_HASH = "[0-9a-fA-F]+";',f'public static String APP_HASH = "{api_hash}";',t,count=1)
+          if n1!=1 or n2!=1: raise SystemExit('BuildVars credential replacement failed')
+          p.write_text(t)
+          print('Private Telegram credentials injected; values hidden.')
+          PY
+
+      - name: Restrict ARM64 and prepare standalone
+        working-directory: Telegram
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          def edit(path,old,new,expected):
+              p=Path(path); t=p.read_text(); c=t.count(old)
+              if c!=expected: raise SystemExit(f'{path}: expected {expected}, got {c}')
+              p.write_text(t.replace(old,new))
+          edit('TMessagesProj_App/build.gradle','abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"','abiFilters "arm64-v8a"',3)
+          edit('TMessagesProj/build.gradle','        multiDexEnabled true\n\n        externalNativeBuild {\n','        multiDexEnabled true\n\n        ndk {\n            abiFilters "arm64-v8a"\n        }\n\n        externalNativeBuild {\n',1)
+          edit('TMessagesProj/build.gradle',"ndk.debugSymbolLevel = 'FULL'","ndk.debugSymbolLevel = 'NONE'",6)
+          edit('TMessagesProj_App/build.gradle',"ndk.debugSymbolLevel = 'FULL'","ndk.debugSymbolLevel = 'NONE'",3)
+          manifest=Path('TMessagesProj/config/release/AndroidManifest_standalone.xml'); t=manifest.read_text()
+          for name in ['ic_launcher','icon_2_launcher','icon_3_launcher','icon_4_launcher','icon_5_launcher','icon_6_launcher']:
+              old=f'@mipmap/{name}_sa'
+              if old not in t: raise SystemExit(f'missing {old}')
+              t=t.replace(old,f'@mipmap/{name}')
+          manifest.write_text(t)
+          app=Path('TMessagesProj_App/build.gradle'); t=app.read_text(); marker='        standalone {\n            debuggable false\n'
+          if marker not in t: raise SystemExit('standalone marker not found')
+          app.write_text(t.replace(marker,"        standalone {\n            matchingFallbacks = ['release']\n            debuggable false\n",1))
+          PY
+
+      - name: Compile patched Java
+        working-directory: Telegram
+        shell: bash
+        run: |
+          set -euxo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace --max-workers=4 :TMessagesProj_App:compileAfatStandaloneJavaWithJavac
+
+      - name: Build APK with same upstream signer as working APK
+        working-directory: Telegram
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Deliberately do NOT override release.keystore or Gradle signing properties.
+          # The working APK is signed by Telegram's bundled public development/release key.
+          ./gradlew --no-daemon --stacktrace --max-workers=4 :TMessagesProj_App:assembleAfatStandalone
+
+      - name: Verify APK identity signer ABI
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APK=Telegram/TMessagesProj_App/build/outputs/apk/afat/standalone/app.apk
+          test -s "$APK"
+          sha256sum "$APK" | tee app.apk.sha256
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$APK" | tee signing-certificate.txt
+          grep -qi 'a08d7dc323ddf71ef3201944397e0d3cce7d40847263e11f328b68bbe19229ab' signing-certificate.txt
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | head -n 5 | tee apk-identity.txt
+          grep -q "package: name='org.telegram.messenger.web'" apk-identity.txt
+          grep -q "versionCode='70389'" apk-identity.txt
+          grep -q "versionName='12.10.1'" apk-identity.txt
+          unzip -l "$APK" | grep 'lib/' | awk '{print $4}' | cut -d/ -f2 | sort -u | tee apk-abis.txt
+          grep -qx 'arm64-v8a' apk-abis.txt
+          test "$(wc -l < apk-abis.txt)" -eq 1
+
+      - name: Upload reliability APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-web-proxy-12.10.1-reliability-same-signer-arm64
+          path: |
+            Telegram/TMessagesProj_App/build/outputs/apk/afat/standalone/app.apk
+            app.apk.sha256
+            signing-certificate.txt
+            apk-identity.txt
+            apk-abis.txt
+          if-no-files-found: error
+          retention-days: 7
