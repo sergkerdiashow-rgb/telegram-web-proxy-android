@@ -48,6 +48,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Run WEB proxy transport self-test
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 selftest/run.py
+
       - name: Set up Android command-line tools
         uses: android-actions/setup-android@v3
 
@@ -85,107 +91,6 @@ jobs:
           set -euxo pipefail
           python3 apply_web_proxy_patch.py Telegram --dry-run
           python3 apply_web_proxy_patch.py Telegram
-
-      - name: Add disposable isolated WebView profile hardening
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java")
-          text = path.read_text()
-
-          def once(old, new, label):
-              global text
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f"{label}: expected one match, found {count}")
-              text = text.replace(old, new, 1)
-
-          once(
-              "import androidx.webkit.JavaScriptReplyProxy;\n",
-              "import androidx.webkit.JavaScriptReplyProxy;\nimport androidx.webkit.ProfileStore;\n",
-              "ProfileStore import",
-          )
-          once(
-              "    private final ConcurrentHashMap<Integer, LocalStream> streams = new ConcurrentHashMap<>();\n",
-              "    private final ConcurrentHashMap<Integer, LocalStream> streams = new ConcurrentHashMap<>();\n"
-              "    private final ConcurrentHashMap<WebView, String> disposableProfiles = new ConcurrentHashMap<>();\n",
-              "profile registry",
-          )
-          once(
-              "            Context context = ApplicationLoader.applicationContext;\n"
-              "            WebView view = new WebView(context);\n"
-              "            webView = view;\n\n"
-              "            WebSettings settings = view.getSettings();\n",
-              "            Context context = ApplicationLoader.applicationContext;\n"
-              "            WebView view = new WebView(context);\n"
-              "            webView = view;\n"
-              "            if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {\n"
-              "                // Isolate WEB-proxy browser state from Mini Apps, payments and other WebViews.\n"
-              "                String profileName = randomProfileName();\n"
-              "                disposableProfiles.put(view, profileName);\n"
-              "                WebViewCompat.setProfile(view, profileName);\n"
-              "            }\n\n"
-              "            WebSettings settings = view.getSettings();\n",
-              "profile assignment",
-          )
-          once(
-              "    private String randomToken() {\n"
-              "        byte[] bytes = new byte[32];\n"
-              "        random.nextBytes(bytes);\n"
-              "        return android.util.Base64.encodeToString(bytes,\n"
-              "                android.util.Base64.URL_SAFE | android.util.Base64.NO_WRAP | android.util.Base64.NO_PADDING);\n"
-              "    }\n",
-              "    private String randomToken() {\n"
-              "        byte[] bytes = new byte[32];\n"
-              "        random.nextBytes(bytes);\n"
-              "        return android.util.Base64.encodeToString(bytes,\n"
-              "                android.util.Base64.URL_SAFE | android.util.Base64.NO_WRAP | android.util.Base64.NO_PADDING);\n"
-              "    }\n\n"
-              "    private String randomProfileName() {\n"
-              "        byte[] bytes = new byte[16];\n"
-              "        random.nextBytes(bytes);\n"
-              "        StringBuilder result = new StringBuilder(\"telegram_web_proxy_\");\n"
-              "        for (byte value : bytes) {\n"
-              "            result.append(String.format(Locale.US, \"%02x\", value & 0xff));\n"
-              "        }\n"
-              "        return result.toString();\n"
-              "    }\n",
-              "profile name helper",
-          )
-          once(
-              "    private static void destroyWebView(WebView view) {\n"
-              "        try { WebViewCompat.removeWebMessageListener(view, JS_OBJECT); } catch (Throwable ignore) { }\n"
-              "        try { view.stopLoading(); } catch (Throwable ignore) { }\n"
-              "        try { view.loadUrl(\"about:blank\"); } catch (Throwable ignore) { }\n"
-              "        try { view.clearHistory(); } catch (Throwable ignore) { }\n"
-              "        try { view.removeAllViews(); } catch (Throwable ignore) { }\n"
-              "        try { view.destroy(); } catch (Throwable ignore) { }\n"
-              "    }\n",
-              "    private void destroyWebView(WebView view) {\n"
-              "        String profileName = disposableProfiles.remove(view);\n"
-              "        try { WebViewCompat.removeWebMessageListener(view, JS_OBJECT); } catch (Throwable ignore) { }\n"
-              "        try { view.stopLoading(); } catch (Throwable ignore) { }\n"
-              "        try { view.loadUrl(\"about:blank\"); } catch (Throwable ignore) { }\n"
-              "        try { view.clearHistory(); } catch (Throwable ignore) { }\n"
-              "        try { view.removeAllViews(); } catch (Throwable ignore) { }\n"
-              "        try { view.destroy(); } catch (Throwable ignore) { }\n"
-              "        if (profileName != null && WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {\n"
-              "            try { ProfileStore.getInstance().deleteProfile(profileName); } catch (Throwable t) {\n"
-              "                FileLog.e(TAG + \": disposable WebView profile cleanup failed\", t);\n"
-              "            }\n"
-              "        }\n"
-              "    }\n",
-              "profile deletion",
-          )
-
-          path.write_text(text)
-          PY
-          grep -q 'WebViewFeature.MULTI_PROFILE' Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
-          grep -q 'WebViewCompat.setProfile(view, profileName)' Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
-          grep -q 'ProfileStore.getInstance().deleteProfile(profileName)' Telegram/TMessagesProj/src/main/java/org/telegram/messenger/WebProxyTransport.java
 
       - name: Inject private Telegram API credentials only
         shell: bash

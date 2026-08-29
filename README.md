@@ -10,6 +10,7 @@ GitHub Actions автоматически:
 
 - восстанавливает исходники POC из `chunks/`;
 - проверяет официальные capability test vectors;
+- гоняет `selftest/run.py` — транспорт целиком на обычной JVM, без SDK и без релея;
 - скачивает зафиксированный Telegram Android;
 - ставит Android SDK 35, Build-tools 35.0.0, NDK 27.2.12479018 и CMake 3.10.2;
 - делает dry-run патча;
@@ -20,6 +21,38 @@ GitHub Actions автоматически:
 
 Сборка ограничена одной ABI намеренно: `TMessagesProj_App` управляет только упаковкой, а нативные CMake-таски живут в `TMessagesProj`. Без `abiFilters` в библиотечном модуле AGP собирает все четыре ABI, и раннер GitHub падает с `No space left on device` при линковке x86.
 
+## Как устроен репозиторий
+
+Весь патч — включая Java-транспорт — лежит в `chunks/` как base64-куски gzip-нутого
+самораспаковывающегося скрипта. Разобрать и собрать обратно:
+
+```bash
+cat chunks/*.txt | base64 --decode | gzip --decompress > ci_bundle.py && python3 ci_bundle.py
+# ... правки в WebProxyTransport.java / apply_web_proxy_patch.py / selftest/ ...
+python3 tools/pack.py . --out chunks
+```
+
+`tools/pack.py` детерминирован: одинаковый вход даёт побайтово одинаковые чанки.
+
+## Проверки без устройства
+
+```bash
+python3 protocol_vectors_test.py   # capability-векторы + маркеры протокола и надёжности
+python3 selftest/run.py            # транспорт end-to-end на JVM, ~10 секунд
+```
+
+`selftest/` подставляет транспорту тест-дубли Android и AndroidX: настоящий
+упорядоченный main-looper, WebView, сообщающий о навигации, и WebMessage-границу,
+в которую пишет фейковый bridge. tgnet изображают обычные loopback-сокеты — ровно
+то, что он и открывает к sidecar'у в реальном приложении. Проверяются `HELLO`/
+`WELCOME`, `OPEN` на каждое соединение, `DATA` в обе стороны, полный возврат
+`WINDOW`-кредита, и главное — что фреймы уровня стрима (запоздавшая `DATA` для уже
+закрытого стрима, фреймы для неизвестного id) отбрасываются и **не** роняют каррер,
+а настоящие сбои каррера — роняют.
+
+Дубли в `selftest/src/` существуют только для этого теста; APK собирается против
+настоящего Android SDK.
+
 ## Что означает «работает»
 
 APK ставится на устройство arm64 (почти все современные телефоны). Внутри появляется третий тип прокси — `WEB Proxy` — в Settings → Data and Storage → Proxy → Add Proxy: hostname + MTProxy secret, без порта.
@@ -28,7 +61,14 @@ WEB proxy использует hostname + MTProxy secret, внешний carrier
 
 Из этого следует главное ограничение: чтобы WEB proxy реально соединялся, нужен работающий relay `tproxy-server` на этом hostname, отдающий bridge-страницу по `https://<host>/?bridge=<capability>`. Без такого сервера тип прокси настраивается и сохраняется, но соединение не поднимется — это ожидаемое поведение fail-closed, а не дефект сборки.
 
-Требования к устройству: Android System WebView должен поддерживать `WEB_MESSAGE_LISTENER`, `WEB_MESSAGE_ARRAY_BUFFER` и `DOCUMENT_START_SCRIPT`. Транспорт работает только пока приложение на переднем плане.
+Требования к устройству: Android System WebView должен поддерживать `WEB_MESSAGE_LISTENER`, `WEB_MESSAGE_ARRAY_BUFFER` и `DOCUMENT_START_SCRIPT`. Транспорт рассчитан на работу с приложением на переднем плане.
+
+Несущий WebView прикрепляется к окну активного экрана как прозрачная точка 1×1.
+Это не косметика: неприкреплённый WebView для движка — невидимая страница, и
+Chromium тротлит её таймеры и понижает приоритет сети. Bridge крутит свой long-poll
+как раз на таймерах, поэтому неприкреплённый каррер регулярно замирал на десятки
+секунд. Подмена `document.visibilityState` в document-start скрипте обманывает
+только код самой страницы, но не движок.
 
 ## Лицензия и происхождение кода
 

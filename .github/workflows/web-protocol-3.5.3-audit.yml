@@ -30,6 +30,18 @@ jobs:
           python3 -m py_compile apply_web_proxy_patch.py protocol_vectors_test.py
           python3 protocol_vectors_test.py
 
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Run WEB proxy transport self-test
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 selftest/run.py
+
       - name: Checkout pinned Telegram Android 12.10.1
         shell: bash
         run: |
@@ -74,6 +86,12 @@ jobs:
             'setDomStorageEnabled(false)'
             'setJavaScriptCanOpenWindowsAutomatically(false)'
             'onRenderProcessGone'
+            'attachCarrier(view)'
+            'CARRIER_STALL_TIMEOUT_MS'
+            'bridge reported carrier failure'
+            'WINDOW_UPDATE_THRESHOLD'
+            'ensureAcceptLoopLocked'
+            'MutationObserver'
           )
           for needle in "${required[@]}"; do
             if ! grep -Fq "$needle" "$WEB"; then
@@ -89,11 +107,21 @@ jobs:
           grep -Fq 'https://' "$WEB"
           ! grep -Fq 'addJavascriptInterface' "$WEB"
 
-          # Final signed workflow adds a disposable isolated WebView profile.
-          FLOW=.github/workflows/build-signed-12.10.1.yml
-          grep -Fq 'WebViewFeature.MULTI_PROFILE' "$FLOW"
-          grep -Fq 'WebViewCompat.setProfile(view, profileName)' "$FLOW"
-          grep -Fq 'ProfileStore.getInstance().deleteProfile(profileName)' "$FLOW"
+          # Stream-scoped frames are dropped, never escalated to a carrier failure.
+          ! grep -Fq 'unknown live stream' "$WEB"
+          grep -Fq 'if (stream != null) stream.onDownlinkData(payload);' "$WEB"
+          grep -Fq 'if (stream != null) stream.onWindow(delta);' "$WEB"
+          grep -Fq 'if (stream != null) stream.closeFromRelay();' "$WEB"
+
+          # The disposable isolated WebView profile lives in the transport itself, so it
+          # is reviewed, compiled and self-tested like the rest of it. It used to be
+          # spliced in by the signed-build workflow with literal source matching, which
+          # silently coupled every edit of this file to that workflow's anchors.
+          grep -Fq 'WebViewFeature.MULTI_PROFILE' "$WEB"
+          grep -Fq 'WebViewCompat.setProfile(view, profileName)' "$WEB"
+          grep -Fq 'ProfileStore.getInstance().deleteProfile(profileName)' "$WEB"
+          # The bracket keeps this guard from matching its own pattern.
+          ! grep -rq -- '- name: Add dispos[a]ble isolated WebView profile' .github/workflows/
 
       - name: Verify current official tproxy-server contract
         shell: bash
@@ -144,3 +172,4 @@ jobs:
           echo 'WSS is permitted by the Android carrier policy.'
           echo 'Official tproxy-server HTTPS/HTTPS-lanes/WebSocket/WebSocket-lanes contract verified.'
           echo 'TeleMT 3.5.3 Android bridge compatibility markers verified.'
+          echo 'Carrier reliability contract verified: stream-scoped frames never replace the carrier.'
